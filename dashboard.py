@@ -50,6 +50,21 @@ def load_projects(cache_key: float) -> pd.DataFrame:
         categorise(m, n) for m, n in zip(df["methodology_resolved"], df["name"])
     ]
     df["kind"] = df["programme_of_activities"].map(KIND_LABEL).fillna(KIND_LABEL[None])
+
+    # Join actual issued / retired totals from credit_blocks. "Issued" in the API only
+    # returns credit blocks that are still active (unretired), so the true "total ever
+    # issued" for a project = active_issued + retired.
+    with _connect() as conn:
+        totals = pd.read_sql_query(
+            "SELECT project_id, status, SUM(number_of_credits) AS n "
+            "FROM credit_blocks GROUP BY project_id, status",
+            conn,
+        )
+    pivoted = totals.pivot(index="project_id", columns="status", values="n").fillna(0)
+    df["issued_active"] = df["id"].map(pivoted.get("ISSUED", pd.Series(dtype=float))).fillna(0).astype(int)
+    df["retired"]       = df["id"].map(pivoted.get("RETIRED", pd.Series(dtype=float))).fillna(0).astype(int)
+    df["issued_total"]  = df["issued_active"] + df["retired"]
+    df["pct_retired"]   = (df["retired"] / df["issued_total"]).where(df["issued_total"] > 0)
     return df
 
 
@@ -339,8 +354,28 @@ if cat_filter:
 
 show_cols = [
     "sustaincert_id", "name", "kind", "category", "methodology_resolved",
-    "status", "country", "project_developer", "estimated_annual_credits",
+    "status", "country", "project_developer",
+    "issued_total", "retired", "issued_active", "pct_retired",
+    "estimated_annual_credits",
     "crediting_period_start_date", "crediting_period_end_date", "sustaincert_url",
 ]
-st.dataframe(view[show_cols], hide_index=True, use_container_width=True, height=420)
+st.dataframe(
+    view[show_cols],
+    hide_index=True,
+    use_container_width=True,
+    height=420,
+    column_config={
+        "issued_total":  st.column_config.NumberColumn("Issued (total)", format="%d",
+            help="All credits ever issued for this project = active + retired."),
+        "retired":       st.column_config.NumberColumn("Retired", format="%d"),
+        "issued_active": st.column_config.NumberColumn("Issued (active)", format="%d",
+            help="Issued credits still in circulation (not yet retired)."),
+        "pct_retired":   st.column_config.NumberColumn("% retired", format="%.1f%%",
+            help="Retired ÷ total ever issued. Blank when the project has no issuances."),
+        "estimated_annual_credits": st.column_config.NumberColumn("Est. annual credits (PDD)",
+            format="%d", help="Planning figure from the PDD — not actual issuances."),
+        "sustaincert_url": st.column_config.LinkColumn("SustainCert link"),
+    },
+)
+# pct_retired is a share (0..1); Streamlit's %.1f%% formatter expects that scale.
 st.caption(f"{len(view)} projects shown.")
