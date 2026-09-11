@@ -69,7 +69,7 @@ UNKNOWN_METHODOLOGY = "Unknown methodology"
 # never exposed the methodology for them, it only lives in the PDD PDF). These lean
 # harder on obvious wording so we don't mis-categorise on a passing mention.
 _NAME_RULES: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"improved (kitchen|cookstove|cooking)|clean cooking|efficient cookstove|\bICS\b", re.I), "Clean cooking"),
+    (re.compile(r"improved (kitchen|cook.?stove|cooking)|clean cooking|efficient cook.?stove|cooking device|\bICS\b", re.I), "Clean cooking"),
     (re.compile(r"safe (drinking )?water|clean water|water (supply|purification|filtration)|\bWATER\b.*(borehole|kiosk)", re.I), "Safe drinking water"),
     (re.compile(r"borehole", re.I), "Safe drinking water"),
     (re.compile(r"solar (home|lantern|lighting|lamp|kit)|off.grid solar", re.I), "Household solar"),
