@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import io
 import sqlite3
-import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -20,10 +18,9 @@ import streamlit as st
 from beneficiary import best_name, parse as parse_note
 from cf_style import apply_all as apply_cf_style
 from methodology_map import categorise, resolve_methodology, UNKNOWN_METHODOLOGY
+from scraper import run_refresh
 
 DB_PATH = Path(__file__).parent / "gs_registry.db"
-SCRAPER = Path(__file__).parent / "scraper.py"
-PYTHON = Path(__file__).parent / "venv" / "bin" / "python"
 
 
 # ---------------------------------------------------------------------------
@@ -88,19 +85,23 @@ def db_exists() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Refresh (invokes scraper as subprocess so the Streamlit process stays responsive)
+# Refresh (calls the scraper in-process — works locally and on Streamlit Cloud,
+# where there is no venv Python binary to subprocess into.)
 # ---------------------------------------------------------------------------
 
 
-def run_scraper(mode: str, countries: list[str], log_area) -> int:
-    cmd = [str(PYTHON), str(SCRAPER), "--mode", mode, "--countries", ",".join(countries)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+def run_scraper(mode: str, countries: list[str], log_area) -> tuple[bool, str | None]:
     buf = io.StringIO()
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        buf.write(line)
+
+    def progress(msg: str) -> None:
+        buf.write(msg + "\n")
         log_area.code(buf.getvalue(), language="text")
-    return proc.wait()
+
+    try:
+        run_refresh(mode=mode, countries=countries, progress=progress)
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +152,11 @@ if refresh_clicked:
     with st.expander("Scraper log", expanded=True):
         log_area = st.empty()
         with st.spinner("Scraping GS Registry…"):
-            rc = run_scraper(mode, ["MW"], log_area)
-        if rc == 0:
+            ok, err = run_scraper(mode, ["MW"], log_area)
+        if ok:
             st.success("Refresh complete.")
         else:
-            st.error(f"Scraper exited with code {rc}. See log above.")
+            st.error(f"Scraper failed: {err}")
     st.session_state.data_version = time.time()
     st.rerun()
 
