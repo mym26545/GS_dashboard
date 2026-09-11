@@ -23,6 +23,16 @@ from scraper import run_refresh
 DB_PATH = Path(__file__).parent / "gs_registry.db"
 
 
+# GS terminology: a "PoA" is the umbrella framework; a project activity under it is a
+# "VPA under PoA"; a project activity registered on its own is a "Standalone VPA".
+KIND_LABEL = {
+    "POA":        "PoA",
+    "VPA":        "VPA under PoA",
+    "Standalone": "Standalone VPA",
+    None:         "Standalone VPA",
+}
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -51,9 +61,9 @@ def load_projects(cache_key: float) -> pd.DataFrame:
     ]
     df["kind"] = df["programme_of_activities"].map(KIND_LABEL).fillna(KIND_LABEL[None])
 
-    # Join actual issued / retired totals from credit_blocks. "Issued" in the API only
-    # returns credit blocks that are still active (unretired), so the true "total ever
-    # issued" for a project = active_issued + retired.
+    # Join actual issued / retired totals from credit_blocks. "Issued" in the GS API
+    # only returns credit blocks that are still active (unretired); retirements live in
+    # a separate endpoint. So the true "total ever issued" = active_issued + retired.
     with _connect() as conn:
         totals = pd.read_sql_query(
             "SELECT project_id, status, SUM(number_of_credits) AS n "
@@ -61,29 +71,18 @@ def load_projects(cache_key: float) -> pd.DataFrame:
             conn,
         )
     pivoted = totals.pivot(index="project_id", columns="status", values="n").fillna(0)
-    df["issued_active"] = df["id"].map(pivoted.get("ISSUED", pd.Series(dtype=float))).fillna(0).astype(int)
+    df["issued_active"] = df["id"].map(pivoted.get("ISSUED",  pd.Series(dtype=float))).fillna(0).astype(int)
     df["retired"]       = df["id"].map(pivoted.get("RETIRED", pd.Series(dtype=float))).fillna(0).astype(int)
     df["issued_total"]  = df["issued_active"] + df["retired"]
     df["pct_retired"]   = (df["retired"] / df["issued_total"]).where(df["issued_total"] > 0)
     return df
 
 
-# GS terminology: a "PoA" is the umbrella framework; a project activity under it is a
-# "VPA under PoA"; a project activity registered on its own is a "Standalone VPA".
-KIND_LABEL = {
-    "POA":        "PoA",
-    "VPA":        "VPA under PoA",
-    "Standalone": "Standalone VPA",
-    None:         "Standalone VPA",
-}
-
-
 @st.cache_data(show_spinner=False)
 def load_credits(cache_key: float) -> pd.DataFrame:
     del cache_key
     with _connect() as conn:
-        df = pd.read_sql_query("SELECT * FROM credit_blocks", conn)
-    return df
+        return pd.read_sql_query("SELECT * FROM credit_blocks", conn)
 
 
 @st.cache_data(show_spinner=False)
@@ -180,7 +179,7 @@ if not db_exists():
     st.stop()
 
 projects = load_projects(st.session_state.data_version)
-credits = load_credits(st.session_state.data_version)
+credits  = load_credits(st.session_state.data_version)
 
 if projects.empty:
     st.warning("No projects in the database yet.")
@@ -190,22 +189,39 @@ if projects.empty:
 # Summary tiles
 # ---------------------------------------------------------------------------
 
-kind_counts = projects["kind"].value_counts()
-issued = credits[credits["status"] == "ISSUED"]
-retired = credits[credits["status"] == "RETIRED"]
+kind_counts   = projects["kind"].value_counts()
+issued_active = credits[credits["status"] == "ISSUED"]   # currently outstanding
+retired       = credits[credits["status"] == "RETIRED"]  # all-time retired
+issued        = credits                                  # total ever issued (active + retired)
+
+total_issued  = int(issued["number_of_credits"].sum())
+total_retired = int(retired["number_of_credits"].sum())
+total_active  = int(issued_active["number_of_credits"].sum())
 
 tile_cols = st.columns(6)
 tile_cols[0].metric("Projects", len(projects))
 tile_cols[1].metric("PoAs", int(kind_counts.get("PoA", 0)))
 tile_cols[2].metric("VPAs under PoA", int(kind_counts.get("VPA under PoA", 0)))
 tile_cols[3].metric("Standalone VPAs", int(kind_counts.get("Standalone VPA", 0)))
-tile_cols[4].metric("Credits issued", f"{int(issued['number_of_credits'].sum()):,}")
-tile_cols[5].metric("Credits retired", f"{int(retired['number_of_credits'].sum()):,}")
+tile_cols[4].metric(
+    "Credits issued (total)",
+    f"{total_issued:,}",
+    help=f"All credits ever issued for Malawi projects (active + retired). "
+         f"{total_active:,} currently outstanding · {total_retired:,} retired.",
+)
+tile_cols[5].metric(
+    "Credits retired",
+    f"{total_retired:,}",
+    help=(
+        f"All-time retirements — {total_retired / total_issued * 100:.1f}% "
+        f"of total ever issued."
+    ) if total_issued else "",
+)
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Project type breakdown (from methodology)
+# Project types (from methodology, not GS tag)
 # ---------------------------------------------------------------------------
 
 st.subheader("Project types (categorised on methodology, not GS `type` tag)")
@@ -237,7 +253,6 @@ st.subheader("PoAs and VPAs per country")
 poa_country = (
     projects.groupby(["country", "kind"]).size().reset_index(name="projects")
 )
-# Fix legend order so it reads umbrella → hosted → standalone.
 kind_order = ["PoA", "VPA under PoA", "Standalone VPA"]
 fig = px.bar(poa_country, x="country", y="projects", color="kind", barmode="group",
              height=380, text="projects", category_orders={"kind": kind_order})
@@ -251,11 +266,11 @@ st.divider()
 # ---------------------------------------------------------------------------
 
 st.subheader("Issued credits by methodology + country")
+st.caption("Total credits ever issued for each methodology (currently outstanding + already retired).")
 
 if issued.empty:
     st.info("No issued credits in the database yet.")
 else:
-    # Join credits → projects to pick up methodology (already resolved) and country
     proj_view = projects.set_index("id")[["methodology_resolved", "category", "country"]]
     issued_j = issued.join(proj_view, on="project_id")
     by_meth = (
@@ -377,5 +392,4 @@ st.dataframe(
         "sustaincert_url": st.column_config.LinkColumn("SustainCert link"),
     },
 )
-# pct_retired is a share (0..1); Streamlit's %.1f%% formatter expects that scale.
 st.caption(f"{len(view)} projects shown.")
